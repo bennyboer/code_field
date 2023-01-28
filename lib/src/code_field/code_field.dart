@@ -1,13 +1,17 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:linked_scroll_controller/linked_scroll_controller.dart';
 
 import '../code_theme/code_theme.dart';
 import '../line_numbers/line_number_controller.dart';
 import '../line_numbers/line_number_style.dart';
+import '../line_numbers/line_range.dart';
 import 'code_controller.dart';
+import 'text_field_layout.dart';
 
 class CodeField extends StatefulWidget {
   /// {@macro flutter.widgets.textField.smartQuotesType}
@@ -104,12 +108,17 @@ class _CodeFieldState extends State<CodeField> {
   LinkedScrollControllerGroup? _controllers;
   ScrollController? _numberScroll;
   ScrollController? _codeScroll;
-  LineNumberController? _numberController;
+  LineNumberController? _lineNumberController;
+
+  final GlobalKey _codeFieldKey = GlobalKey();
+  final GlobalKey _lineNumberTextFieldKey = GlobalKey();
 
   StreamSubscription<bool>? _keyboardVisibilitySubscription;
   FocusNode? _focusNode;
   String? lines;
   String longestLine = '';
+
+  bool _lineNumbersDirtyFlag = false;
 
   @override
   void initState() {
@@ -117,7 +126,7 @@ class _CodeFieldState extends State<CodeField> {
     _controllers = LinkedScrollControllerGroup();
     _numberScroll = _controllers?.addAndGet();
     _codeScroll = _controllers?.addAndGet();
-    _numberController = LineNumberController(widget.lineNumberBuilder);
+    _lineNumberController = LineNumberController(widget.lineNumberBuilder);
     widget.controller.addListener(_onTextChanged);
     _focusNode = widget.focusNode ?? FocusNode();
     _focusNode!.onKey = _onKey;
@@ -139,7 +148,7 @@ class _CodeFieldState extends State<CodeField> {
     widget.controller.removeListener(_onTextChanged);
     _numberScroll?.dispose();
     _codeScroll?.dispose();
-    _numberController?.dispose();
+    _lineNumberController?.dispose();
     _keyboardVisibilitySubscription?.cancel();
     super.dispose();
   }
@@ -149,23 +158,19 @@ class _CodeFieldState extends State<CodeField> {
   }
 
   void _onTextChanged() {
-    // Rebuild line number
-    final str = widget.controller.text.split('\n');
-    final buf = <String>[];
-
-    for (var k = 0; k < str.length; k++) {
-      buf.add((k + 1).toString());
-    }
-
-    _numberController?.text = buf.join('\n');
+    final lineStrings = widget.controller.text.split('\n');
 
     // Find longest line
     longestLine = '';
-    widget.controller.text.split('\n').forEach((line) {
+    for (var line in lineStrings) {
       if (line.length > longestLine.length) longestLine = line;
-    });
+    }
 
-    setState(() {});
+    setState(() {
+      if (widget.lineNumbers) {
+        _markLineNumbersDirty();
+      }
+    });
   }
 
   // Wrap the codeField in a horizontal scrollView
@@ -211,6 +216,8 @@ class _CodeFieldState extends State<CodeField> {
 
   @override
   Widget build(BuildContext context) {
+    _updateLineNumbersAfterBuildIfNecessary();
+
     // Default color scheme
     const rootKey = 'root';
     final defaultBg = Colors.grey.shade900;
@@ -250,10 +257,11 @@ class _CodeFieldState extends State<CodeField> {
 
     if (widget.lineNumbers) {
       lineNumberCol = TextField(
+        key: _lineNumberTextFieldKey,
         smartQuotesType: widget.smartQuotesType,
         scrollPadding: widget.padding,
         style: numberTextStyle,
-        controller: _numberController,
+        controller: _lineNumberController,
         enabled: false,
         minLines: widget.minLines,
         maxLines: widget.maxLines,
@@ -279,6 +287,7 @@ class _CodeFieldState extends State<CodeField> {
     }
 
     final codeField = TextField(
+      key: _codeFieldKey,
       keyboardType: widget.keyboardType,
       smartQuotesType: widget.smartQuotesType,
       focusNode: _focusNode,
@@ -331,5 +340,61 @@ class _CodeFieldState extends State<CodeField> {
         ],
       ),
     );
+  }
+
+  void _markLineNumbersDirty() {
+    _lineNumbersDirtyFlag = true;
+  }
+
+  void _updateLineNumbersAfterBuildIfNecessary() {
+    if (_lineNumbersDirtyFlag) {
+      _updateLineNumbersAfterBuild();
+      _lineNumbersDirtyFlag = false;
+    }
+  }
+
+  void _updateLineNumbersAfterBuild() {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateLineNumbers());
+  }
+
+  void _updateLineNumbers() {
+    final TextFieldLayout textFieldLayout = TextFieldLayout(_codeFieldKey);
+
+    final lineStrings = widget.controller.text.split('\n');
+    var offset = 0;
+    var currentLineIndex = 0;
+    final lineHeight = textFieldLayout.lineHeight();
+    List<LineRange> lineRanges = [];
+    for (var lineIndex = 0; lineIndex < lineStrings.length; lineIndex++) {
+      final lineString = lineStrings[lineIndex];
+
+      var lineCount = 1;
+      if (lineString.isNotEmpty) {
+        final int endOffset = offset + lineString.length;
+        final startY = textFieldLayout.lineOffset(offset);
+        final endY = textFieldLayout.lineOffset(endOffset);
+
+        lineCount = ((endY - startY) / lineHeight).round() + 1;
+      }
+
+      final startLineIndex = currentLineIndex;
+      final endLineIndex = currentLineIndex + lineCount;
+      final lineRange = LineRange(start: startLineIndex, end: endLineIndex);
+      lineRanges.add(lineRange);
+
+      currentLineIndex += lineCount;
+
+      offset += lineString.length + 1;
+    }
+
+    bool lineRangesChanged = !listEquals(
+      lineRanges,
+      _lineNumberController?.lineRanges,
+    );
+    if (lineRangesChanged) {
+      setState(() {
+        _lineNumberController?.lineRanges = lineRanges;
+      });
+    }
   }
 }
